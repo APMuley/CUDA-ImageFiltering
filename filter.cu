@@ -9,23 +9,44 @@ using namespace std::chrono;
 
 
 __global__ 
-void gaussian_blur_vram(uchar* img_g, float* kernel_g, uchar* output, int img_rows, int img_cols, float kernelSum) 
+void gaussian_blur_shared(uchar* img_g, float* kernel_g, uchar* output, int img_rows, int img_cols, float kernelSum) 
 {
-    int x = blockIdx.x * blockDim.x + threadIdx.x + 1;
-    int y = blockIdx.y * blockDim.y + threadIdx.y + 1;
-    int t = (y-1) * img_cols + (x-1);
+    const int TILE_SIZE = 5;
+    __shared__ uchar tile[TILE_SIZE][TILE_SIZE];
 
-    if (x > img_cols || y > img_rows) return;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+    int gx = blockIdx.x * blockDim.x + tx;
+    int gy = blockIdx.y * blockDim.y + ty;
+
+
+    // central pixel
+    tile[ty+1][tx+1] = img_g[gy*img_cols + gx];
+
+    // Only load halo if the global coordinate is valid
+    if (gx-1 >= 0 && tx == 0) tile[ty+1][0] = img_g[gy*img_cols + gx-1];
+    if (gx+1 < img_cols && tx == blockDim.x-1) tile[ty+1][TILE_SIZE-1] = img_g[gy*img_cols + gx+1];
+    if (gy-1 >= 0 && ty == 0) tile[0][tx+1] = img_g[(gy-1)*img_cols + gx];
+    if (gy+1 < img_rows && ty == blockDim.y-1) tile[TILE_SIZE-1][tx+1] = img_g[(gy+1)*img_cols + gx];
+
+    __syncthreads();
+    if (gx >= img_cols || gy >= img_rows) return;
+    int t = gy * img_cols + gx;
 
     float sum = 0;
     for (int dx = -1; dx <= 1; dx++) {
         for (int dy = -1; dy <= 1; dy++) {
-            int nx = x + dx, ny = y + dy;
-            int pixel = img_g[ny*(img_cols+2) + nx];
+            int nx = ty + dy + 1, ny = tx + dx + 1;
+            int pixel = tile[nx][ny];
             sum += pixel * kernel_g[(dy+1)*3 + (dx+1)];
         }
     }
-    output[t] = (uchar) (sum / kernelSum);
+
+    if (gx > 0 && gx < img_cols-1 && gy > 0 && gy < img_rows-1) {
+        int t_out = (gy-1)*(img_cols-2) + (gx-1);
+        output[t_out] = (uchar)(sum/kernelSum);
+    }
 }
 
 
@@ -33,8 +54,6 @@ void gaussian_blur_vram(uchar* img_g, float* kernel_g, uchar* output, int img_ro
 int main() {
     // load image
     Mat img = imread("img.jpeg", IMREAD_GRAYSCALE);
-    int img_rows = img.rows;
-    int img_cols = img.cols;
 
     if (img.empty()) {
         cout << "Empty image!" << endl;
@@ -48,6 +67,7 @@ int main() {
     // make padded image to take care of edges
     Mat padded;
     copyMakeBorder(img, padded, 1, 1, 1, 1, BORDER_REPLICATE);
+    int img_cols = padded.cols;
 
     // output image pointer initialized to 0
     Mat temp = Mat::zeros(img.size(), CV_8UC1);
@@ -78,7 +98,7 @@ int main() {
 
 
     // calling kernel function
-    dim3 block(16,16);
+    dim3 block(3,3);
     dim3 grid((img_cols + block.x - 1) / block.x, (img_rows + block.y - 1) / block.y);
 
     cudaEvent_t start, stop;
@@ -86,7 +106,7 @@ int main() {
     cudaEventCreate(&stop);
 
     cudaEventRecord(start); // start timing
-    gaussian_blur<<<grid, block>>>(img_g, kernel_g, img_output, img_rows, img_cols, kernelSum);
+    gaussian_blur_shared<<<grid, block>>>(img_g, kernel_g, img_output, img_rows, img_cols, kernelSum);
 
     cudaEventRecord(stop);  // stop timing
     cudaEventSynchronize(stop);
