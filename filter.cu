@@ -11,29 +11,42 @@ using namespace std::chrono;
 __global__ 
 void gaussian_blur_shared(uchar* img_g, float* kernel_g, uchar* output, int img_rows, int img_cols, float kernelSum) 
 {
-    const int TILE_SIZE = 5;
+    const int TILE_SIZE = 18;
     __shared__ uchar tile[TILE_SIZE][TILE_SIZE];
 
     int tx = threadIdx.x;
     int ty = threadIdx.y;
 
+    // get global co-ordinate of image pixel
     int gx = blockIdx.x * blockDim.x + tx;
     int gy = blockIdx.y * blockDim.y + ty;
 
+    // get co-ordinate of tile pixel
+    int lx = tx + 1;
+    int ly = ty + 1;
 
-    // central pixel
-    tile[ty+1][tx+1] = img_g[gy*img_cols + gx];
+    // Load the pixel into tile
+    tile[ly][lx] = img_g[gy*img_cols + gx];
 
     // Only load halo if the global coordinate is valid
-    if (gx-1 >= 0 && tx == 0) tile[ty+1][0] = img_g[gy*img_cols + gx-1];
-    if (gx+1 < img_cols && tx == blockDim.x-1) tile[ty+1][TILE_SIZE-1] = img_g[gy*img_cols + gx+1];
-    if (gy-1 >= 0 && ty == 0) tile[0][tx+1] = img_g[(gy-1)*img_cols + gx];
-    if (gy+1 < img_rows && ty == blockDim.y-1) tile[TILE_SIZE-1][tx+1] = img_g[(gy+1)*img_cols + gx];
+    if (tx == 0 && gx > 0) tile[ly][0] = img_g[gy*img_cols + gx-1];
+    if (tx == blockDim.x-1 && gx < img_cols-1) tile[ly][lx+1] = img_g[gy*img_cols + gx+1];
+    if (ty == 0 && gy > 0) tile[0][lx] = img_g[(gy-1)*img_cols + gx];
+    if (ty == blockDim.y-1 && gy < img_rows-1) tile[ly+1][lx] = img_g[(gy+1)*img_cols + gx];
+
+    // Diagonal pixels of the halo
+    if (tx==0 && ty==0 && gx>0 && gy>0) tile[0][0] = img_g[(gy-1)*img_cols + gx-1];
+    if (tx==blockDim.x-1 && ty==0 && gx<img_cols-1 && gy>0) tile[0][lx+1] = img_g[(gy-1)*img_cols + gx+1];
+    if (tx==0 && ty==blockDim.y-1 && gx>0 && gy<img_rows-1) tile[ly+1][0] = img_g[(gy+1)*img_cols + gx-1];
+    if (tx==blockDim.x-1 && ty==blockDim.y-1 && gx<img_cols-1 && gy<img_rows-1) tile[ly+1][lx+1] = img_g[(gy+1)*img_cols + gx+1];
+
+    // No handling of outer halos for now - TODO
 
     __syncthreads();
     if (gx >= img_cols || gy >= img_rows) return;
     int t = gy * img_cols + gx;
 
+    // kernel performs computation by taking average of 8 neighbors around pixel
     float sum = 0;
     for (int dx = -1; dx <= 1; dx++) {
         for (int dy = -1; dy <= 1; dy++) {
@@ -43,6 +56,7 @@ void gaussian_blur_shared(uchar* img_g, float* kernel_g, uchar* output, int img_
         }
     }
 
+    // mapping global co-ordinate to proper output pixel
     if (gx > 0 && gx < img_cols-1 && gy > 0 && gy < img_rows-1) {
         int t_out = (gy-1)*(img_cols-2) + (gx-1);
         output[t_out] = (uchar)(sum/kernelSum);
@@ -68,6 +82,7 @@ int main() {
     Mat padded;
     copyMakeBorder(img, padded, 1, 1, 1, 1, BORDER_REPLICATE);
     int img_cols = padded.cols;
+    int img_rows = padded.rows;
 
     // output image pointer initialized to 0
     Mat temp = Mat::zeros(img.size(), CV_8UC1);
@@ -98,7 +113,7 @@ int main() {
 
 
     // calling kernel function
-    dim3 block(3,3);
+    dim3 block(16,16);
     dim3 grid((img_cols + block.x - 1) / block.x, (img_rows + block.y - 1) / block.y);
 
     cudaEvent_t start, stop;
