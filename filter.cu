@@ -47,6 +47,21 @@ void gaussian_blur_shared(uchar* img_g, float* kernel_g, uchar* output, int img_
 
     __syncthreads();
 
+    // Only load halo if the global coordinate is valid
+    blurred[ly][0] = tile[ly][0];
+    blurred[ly][lx+1] = tile[ly][lx+1];
+    blurred[0][lx] = tile[0][lx];
+    blurred[ly+1][lx] =  tile[ly+1][lx];
+
+    // Diagonal pixels of the halo
+    blurred[0][0] = tile[0][0];
+    blurred[0][lx+1] = tile[0][lx+1];
+    blurred[ly+1][0] =  tile[ly+1][0];
+    blurred[ly+1][lx+1] = tile[ly+1][lx+1];
+
+    // No handling of outer halos for now - TODO
+    __syncthreads();
+
     // kernel performs computation by taking average of 8 neighbors around pixel
     float sum = 0;
     for (int dx = -1; dx <= 1; dx++) {
@@ -80,7 +95,7 @@ void gaussian_blur_shared(uchar* img_g, float* kernel_g, uchar* output, int img_
     for (int i=-1; i<=1; i++) {
         for (int j=-1; j<=1; j++) {
             int nx = tx + 1 + i, ny = ty + 1 + j;
-            int pixel = tile[ny][nx];
+            int pixel = blurred[ny][nx];
             Gx += pixel * sobel_x[i+1][j+1];
             Gy += pixel * sobel_y[i+1][j+1];
         }
