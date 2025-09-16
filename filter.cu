@@ -13,6 +13,7 @@ void gaussian_blur_shared(uchar* img_g, float* kernel_g, uchar* output, int img_
 {
     const int TILE_SIZE = 18;
     __shared__ uchar tile[TILE_SIZE][TILE_SIZE];
+    __shared__ uchar blurred[TILE_SIZE][TILE_SIZE];
 
     int tx = threadIdx.x;
     int ty = threadIdx.y;
@@ -20,6 +21,8 @@ void gaussian_blur_shared(uchar* img_g, float* kernel_g, uchar* output, int img_
     // get global co-ordinate of image pixel
     int gx = blockIdx.x * blockDim.x + tx;
     int gy = blockIdx.y * blockDim.y + ty;
+
+    if (gx >= img_cols || gy >= img_rows) return;
 
     // get co-ordinate of tile pixel
     int lx = tx + 1;
@@ -43,23 +46,60 @@ void gaussian_blur_shared(uchar* img_g, float* kernel_g, uchar* output, int img_
     // No handling of outer halos for now - TODO
 
     __syncthreads();
-    if (gx >= img_cols || gy >= img_rows) return;
-    int t = gy * img_cols + gx;
 
     // kernel performs computation by taking average of 8 neighbors around pixel
     float sum = 0;
     for (int dx = -1; dx <= 1; dx++) {
         for (int dy = -1; dy <= 1; dy++) {
-            int nx = ty + dy + 1, ny = tx + dx + 1;
-            int pixel = tile[nx][ny];
+            int nx = tx + dx + 1, ny = ty + dy + 1;
+            int pixel = tile[ny][nx];
             sum += pixel * kernel_g[(dy+1)*3 + (dx+1)];
         }
     }
 
+    // write to another shared memory (blur for smoothing image)
+    blurred[ly][lx] = (uchar) (sum / 16.0f);
+
+    __syncthreads();
+
+    // addition of sobel edge detection
+    int sobel_x[3][3] = {
+        {-1, 0, 1},
+        {-2, 0, 2},
+        {-1, 0, 1},
+    };
+
+    int sobel_y[3][3] = {
+        {-1, -2, -1},
+        {0, 0, 0},
+        {1, 2, 1},
+    };
+
+    // gx & gy calculation (gradient)
+    float Gx = 0, Gy = 0;
+    for (int i=-1; i<=1; i++) {
+        for (int j=-1; j<=1; j++) {
+            int nx = tx + 1 + i, ny = ty + 1 + j;
+            int pixel = tile[ny][nx];
+            Gx += pixel * sobel_x[i+1][j+1];
+            Gy += pixel * sobel_y[i+1][j+1];
+        }
+    }
+
+    // calcualte magnitude of gradient
+    float mag = sqrt(Gx*Gx + Gy*Gy);
+
+    // setting threshold to 100
+    float threshold = 50.0f;
+    if (mag > threshold) mag = 255.0f;
+    else mag = 0.0f;
+
+    uchar pixel_output = (uchar)min(255.0f, mag);
+
     // mapping global co-ordinate to proper output pixel
     if (gx > 0 && gx < img_cols-1 && gy > 0 && gy < img_rows-1) {
         int t_out = (gy-1)*(img_cols-2) + (gx-1);
-        output[t_out] = (uchar)(sum/kernelSum);
+        output[t_out] = pixel_output;
     }
 }
 
